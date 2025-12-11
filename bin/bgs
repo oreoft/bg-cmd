@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# ============================================================================
+# bgs - Bilibili Goods CLI Tool
+# bgs = bilibili goods
+#
+# A command-line tool for batch publishing and buying items on Bilibili Mall
+# 
+# Usage: bgs <command> [options]
+#
+# Commands:
+#   publish     Batch publish items from inventory
+#   buy         Batch buy items
+#   config      Manage configuration
+#   auth        Manage authentication
+#   help        Show help message
+#   version     Show version
+# ============================================================================
+
+set -e
+
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIBEXEC_DIR="${SCRIPT_DIR}/../libexec"
+
+# Load common module
+# shellcheck disable=SC1091
+source "${LIBEXEC_DIR}/lib/common.sh"
+
+# Show help
+show_help() {
+    cat << 'EOF'
+bgs - Bilibili Goods CLI Tool (bgs = bilibili goods)
+
+Usage: bgs <command> [options]
+
+Commands:
+  publish     Batch publish items from inventory to market
+  buy         Batch buy items from market
+  config      Manage configuration (price, etc.)
+  auth        Manage authentication (login, logout, status)
+  help        Show this help message
+  version     Show version
+
+Examples:
+  bgs auth login              # Login with QR code
+  bgs auth status             # Check login status
+  bgs config publish.price 200       # Set fixed price (200 yuan)
+  bgs config publish.price [100,300] # Set random price (100-300 yuan)
+  bgs publish                 # Publish all items in inventory
+  bgs buy                     # Buy items by ID
+
+For more information on a specific command, use:
+  bgs <command> --help
+
+EOF
+}
+
+# Show version
+show_version() {
+    echo "bgs version ${BG_VERSION}"
+}
+
+# Main function
+main() {
+    # Check dependencies
+    check_dependencies
+    
+    # Ensure config directory exists
+    ensure_bg_home
+    
+    # Parse command
+    local command="${1:-help}"
+    shift || true
+    
+    case "$command" in
+        publish|buy|config|auth)
+            # Execute subcommand
+            exec "${LIBEXEC_DIR}/bg-${command}" "$@"
+            ;;
+        help|--help|-h)
+            show_help
+            ;;
+        version|--version|-v)
+            show_version
+            ;;
+        *)
+            log_error "Unknown command: $command"
+            echo ""
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

@@ -1,0 +1,353 @@
+#!/usr/bin/env bash
+# ============================================================================
+# bgs buy - Batch buy items from market
+# bgs = bilibili goods
+#
+# Usage: bgs buy [item_ids]
+#
+# Item IDs can be provided as:
+#   - Interactive input: just run 'bg buy' and paste IDs
+#   - Command line: bg buy 183955612413,183960137592
+#   - Array format: bg buy [183955612413,183960137592]
+# ============================================================================
+
+set -e
+
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Load dependencies
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/common.sh"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/auth.sh"
+
+# Global variables
+ITEM_IDS=()
+SUCCESSFUL_PAYS=()
+
+# Show help
+show_help() {
+    cat << 'EOF'
+bgs buy - Batch buy items from market
+
+Usage: bgs buy [item_ids]
+
+Arguments:
+  item_ids    Comma-separated list of c2cItemsId to buy
+              Can be in array format: [123,456,789]
+              Or plain: 123,456,789
+
+If no item IDs provided, will prompt for input.
+
+Examples:
+  bgs buy                                    # Interactive mode
+  bgs buy 183955612413,183960137592          # Buy specific items
+  bgs buy [183955612413,183960137592]        # Array format
+
+The script will:
+1. Query item details (price, name)
+2. Create order
+3. Generate Alipay payment link and QR code
+4. Wait for payment confirmation before next item
+
+EOF
+}
+
+# Parse item ID list
+parse_item_ids() {
+    local input="$1"
+    
+    # Remove brackets and spaces
+    local cleaned
+    cleaned=$(echo "$input" | tr -d '[] ' | tr -d '\n')
+    
+    # Split by comma
+    IFS=',' read -r -a ITEM_IDS <<< "$cleaned"
+    
+    # Filter empty values
+    local valid_ids=()
+    for id in "${ITEM_IDS[@]}"; do
+        if [[ -n "$id" && "$id" =~ ^[0-9]+$ ]]; then
+            valid_ids+=("$id")
+        fi
+    done
+    
+    ITEM_IDS=("${valid_ids[@]}")
+}
+
+# Query item details
+query_item_detail() {
+    local c2c_items_id="$1"
+    local cookie
+    cookie=$(build_cookie)
+    
+    local url="${BILI_MALL}/mall-magic-c/internet/c2c/items/queryC2cItemsDetail?c2cItemsId=${c2c_items_id}"
+    
+    http_get "$url" "$cookie"
+}
+
+# Create order info
+create_order_info() {
+    local c2c_items_id="$1"
+    local price="$2"
+    local cookie
+    cookie=$(build_cookie)
+    
+    local url="${BILI_MALL}/magic-c/c2c/order/info?platform=h5"
+    local payload
+    payload=$(cat << EOF
+{
+  "items": { "c2cItemsId": ${c2c_items_id}, "price": ${price} },
+  "sdkVersion": "1.5.3"
+}
+EOF
+)
+    
+    http_post_json "$url" "$payload" "$cookie"
+}
+
+# Create order
+create_order() {
+    local c2c_items_id="$1"
+    local order_info_resp="$2"
+    local cookie
+    cookie=$(build_cookie)
+    
+    load_auth
+    local buvid3="${BUVID3:-$(echo $RANDOM | md5sum | head -c 32)}"
+    local uid="${DEDE_USER_ID}"
+    
+    local url="${BILI_MALL}/magic-c/c2c/order/create?buvid=${buvid3}&platform=h5&uid=${uid}&channel=1&vtoken=&client-type=hyg"
+    
+    local pay_total order_items userinfo return_url
+    pay_total=$(echo "$order_info_resp" | jq '.data.payTotalMoneyAll')
+    order_items=$(echo "$order_info_resp" | jq '.data.orderItems')
+    userinfo=$(echo "$order_info_resp" | jq '.data.deliver[0]')
+    
+    return_url="${BILI_MALL}/neul-next/index.html?page=magic-market_detail&noTitleBar=1&itemsId=${c2c_items_id}&from=pay_result"
+    
+    local payload
+    payload=$(cat << EOF
+{
+  "source": "message",
+  "returnUrl": "$return_url",
+  "recId": "$return_url",
+  "payTotalMoneyAll": $pay_total,
+  "notifyPhone": $(echo "$userinfo" | jq '.phone'),
+  "from": "magicpage",
+  "failUrl": "$return_url",
+  "deviceInfo": "WEB",
+  "deviceType": 2,
+  "orderItems": $order_items,
+  "userinfo": $userinfo
+}
+EOF
+)
+    
+    http_post_json "$url" "$payload" "$cookie"
+}
+
+# Initiate payment
+do_pay() {
+    local pay_info="$1"
+    local cookie
+    cookie=$(build_cookie)
+    
+    local url="${BILI_PAY}/payplatform/pay/pay"
+    
+    # Add Alipay channel params
+    local payload
+    payload=$(echo "$pay_info" | jq '. + {
+        sdkVersion: "1.4.8",
+        realChannel: "open_alipay",
+        payChannel: "alipay",
+        payChannelId: 10041
+    }')
+    
+    http_post_json "$url" "$payload" "$cookie"
+}
+
+# Process single item purchase
+process_buy_item() {
+    local c2c_items_id="$1"
+    
+    echo "=============================="
+    echo "Processing item: $c2c_items_id"
+    
+    # Step 1: Query item details
+    log_info "Querying item details..."
+    local detail_resp
+    detail_resp=$(query_item_detail "$c2c_items_id")
+    
+    local detail_code
+    detail_code=$(echo "$detail_resp" | jq -r '.code')
+    
+    if [[ "$detail_code" != "0" ]]; then
+        log_error "Failed to query item: $detail_resp"
+        return 1
+    fi
+    
+    local price name
+    price=$(echo "$detail_resp" | jq -r '.data.price')
+    name=$(echo "$detail_resp" | jq -r '.data.c2cItemsName')
+    
+    echo "  Name: $name"
+    echo "  Price: $((price / 100)) yuan ($price fen)"
+    
+    # Step 2: Create order info
+    log_info "Creating order info..."
+    local info_resp
+    info_resp=$(create_order_info "$c2c_items_id" "$price")
+    
+    local info_code
+    info_code=$(echo "$info_resp" | jq -r '.code')
+    
+    if [[ "$info_code" != "0" ]]; then
+        log_error "Failed to create order info: $info_resp"
+        
+        # Check login status
+        if [[ "$info_code" == "83001002" ]]; then
+            log_error "Session expired. Please re-login with 'bgs auth login'"
+            rm -f "$BG_AUTH_FILE"
+            exit 1
+        fi
+        return 1
+    fi
+    
+    local pay_total
+    pay_total=$(echo "$info_resp" | jq -r '.data.payTotalMoneyAll')
+    echo "  Total: $((pay_total / 100)) yuan"
+    
+    # Step 3: Create order
+    log_info "Creating order..."
+    local create_resp
+    create_resp=$(create_order "$c2c_items_id" "$info_resp")
+    
+    local create_code
+    create_code=$(echo "$create_resp" | jq -r '.code')
+    
+    if [[ "$create_code" != "0" ]]; then
+        log_error "Failed to create order: $create_resp"
+        return 1
+    fi
+    
+    local pay_info order_id pay_amount
+    pay_info=$(echo "$create_resp" | jq '.data.payInfo')
+    order_id=$(echo "$pay_info" | jq -r '.orderId')
+    pay_amount=$(echo "$pay_info" | jq -r '.payAmount')
+    
+    echo "  Order ID: $order_id"
+    echo "  Pay Amount: $((pay_amount / 100)) yuan"
+    
+    # Step 4: Initiate payment
+    log_info "Initiating payment..."
+    local pay_resp
+    pay_resp=$(do_pay "$pay_info")
+    
+    local pay_errno
+    pay_errno=$(echo "$pay_resp" | jq -r '.errno')
+    
+    if [[ "$pay_errno" != "0" ]]; then
+        log_error "Payment failed: $pay_resp"
+        return 1
+    fi
+    
+    local pay_url
+    pay_url=$(echo "$pay_resp" | jq -r '.data.payChannelUrl')
+    
+    echo ""
+    log_success "Payment link (Alipay):"
+    echo "  $pay_url"
+    echo ""
+    
+    # Generate QR code
+    echo "Payment QR Code:"
+    if command -v qrencode &>/dev/null; then
+        qrencode -t UTF8 -m 1 -s 1 "$pay_url"
+        echo ""
+        echo "If you can't scan, copy the URL above and open in browser"
+    else
+        log_warn "qrencode not installed, cannot display QR code"
+        echo "Copy the URL above and open in browser, or install qrencode: brew install qrencode"
+    fi
+    
+    SUCCESSFUL_PAYS+=("$pay_url")
+    
+    echo ""
+    echo "Please scan to pay. Press Enter when done to continue to next item..."
+    read -r
+    
+    return 0
+}
+
+# Main buy flow
+do_buy() {
+    echo ""
+    echo "========== Starting Batch Buy =========="
+    echo ""
+    
+    log_info "Items to buy: ${#ITEM_IDS[@]}"
+    echo ""
+    
+    local total_processed=0
+    local total_success=0
+    
+    for cid in "${ITEM_IDS[@]}"; do
+        ((total_processed++)) || true
+        
+        if process_buy_item "$cid"; then
+            ((total_success++)) || true
+        fi
+        
+        echo ""
+    done
+    
+    # Output summary
+    echo ""
+    echo "========== Summary =========="
+    echo ""
+    echo "  Total processed: $total_processed"
+    echo "  Successfully initiated: $total_success"
+    echo ""
+}
+
+# Main function
+main() {
+    # Parse arguments
+    case "${1:-}" in
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+    esac
+    
+    # Ensure logged in and cookie is valid
+    ensure_auth
+    
+    # Get item IDs
+    if [[ $# -gt 0 ]]; then
+        # From command line args
+        parse_item_ids "$*"
+    else
+        # Interactive input
+        echo "Please enter item IDs (format: [123,456,789] or 123,456,789):"
+        read -r input
+        parse_item_ids "$input"
+    fi
+    
+    # Check if we have valid IDs
+    if [[ ${#ITEM_IDS[@]} -eq 0 ]]; then
+        log_error "No valid item IDs provided"
+        echo ""
+        show_help
+        exit 1
+    fi
+    
+    log_info "Parsed ${#ITEM_IDS[@]} item(s): ${ITEM_IDS[*]}"
+    
+    # Execute buy
+    do_buy
+}
+
+main "$@"

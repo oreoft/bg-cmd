@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+# ============================================================================
+# bgs publish - Batch publish items from inventory
+# bgs = bilibili goods
+#
+# Usage: bgs publish [options]
+#
+# Options:
+#   --dry-run   Show what would be published without actually doing it
+# ============================================================================
+
+set -e
+
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Load dependencies
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/common.sh"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/auth.sh"
+
+# Global variables
+DRY_RUN=false
+PUBLISHED_IDS=()
+PAGE_SIZE=20
+
+# Show help
+show_help() {
+    cat << 'EOF'
+bgs publish - Batch publish items from inventory
+
+Usage: bgs publish [options]
+
+Options:
+  --dry-run     Show what would be published without actually doing it
+  --help, -h    Show this help message
+
+Before publishing, set your price:
+  bgs config publish.price 200        # Fixed price: 200 yuan
+  bgs config publish.price [100,300]  # Random price: 100-300 yuan
+
+Note: The actual price will be min(your_price, item_max_price) to ensure success.
+
+EOF
+}
+
+# Fetch inventory page
+fetch_inventory_page() {
+    local page_no="$1"
+    local cookie
+    cookie=$(build_cookie)
+    
+    local url="${BILI_MALL}/mall-magic-c/internet/c2c/items/pageFetchBlindBoxItems?pageSize=${PAGE_SIZE}&pageNo=${page_no}"
+    
+    http_get "$url" "$cookie"
+}
+
+# Check item and get token
+check_blind_box() {
+    local blind_box_id="$1"
+    local cookie
+    cookie=$(build_cookie)
+    
+    local url="${BILI_MALL}/magic-c/c2c/blind-box/check"
+    local payload="{\"blindBoxIds\":[${blind_box_id}]}"
+    
+    http_post_json "$url" "$payload" "$cookie"
+}
+
+# Publish item
+publish_item() {
+    local token="$1"
+    local price="$2"
+    local cookie
+    cookie=$(build_cookie)
+    
+    local url="${BILI_MALL}/mall-magic-c/internet/c2c/v2/publish"
+    local payload="{\"price\":\"${price}\",\"token\":\"${token}\",\"isConfirm\":true}"
+    
+    http_post_json "$url" "$payload" "$cookie"
+}
+
+# Process single item
+process_item() {
+    local blind_box_id="$1"
+    local items_name="$2"
+    local max_price="$3"  # Item max price (fen)
+    
+    echo "------------------------------"
+    echo "Processing: $items_name (ID: $blind_box_id)"
+    
+    # Step 1: Check and get token
+    local check_resp
+    check_resp=$(check_blind_box "$blind_box_id")
+    
+    local check_code
+    check_code=$(echo "$check_resp" | jq -r '.code')
+    
+    if [[ "$check_code" != "0" ]]; then
+        log_error "Check failed: $check_resp"
+        return 1
+    fi
+    
+    local token status
+    token=$(echo "$check_resp" | jq -r '.data.token')
+    status=$(echo "$check_resp" | jq -r '.data.status')
+    
+    if [[ "$status" != "true" && "$status" != "True" ]]; then
+        log_warn "Item not available for publishing (status=$status)"
+        return 1
+    fi
+    
+    # Step 2: Calculate price
+    local price
+    price=$(calculate_price "$max_price")
+    local price_yuan=$((price / 100))
+    
+    echo "  Token: ${token:0:16}..."
+    echo "  Price: ${price_yuan} yuan (${price} fen), max allowed: $((max_price / 100)) yuan"
+    
+    if $DRY_RUN; then
+        log_info "[DRY-RUN] Would publish at ${price_yuan} yuan"
+        return 0
+    fi
+    
+    # Step 3: Publish
+    local publish_resp
+    publish_resp=$(publish_item "$token" "$price")
+    
+    local publish_code
+    publish_code=$(echo "$publish_resp" | jq -r '.code')
+    
+    if [[ "$publish_code" != "0" ]]; then
+        log_error "Publish failed: $publish_resp"
+        return 1
+    fi
+    
+    local c2c_id status_str
+    c2c_id=$(echo "$publish_resp" | jq -r '.data.c2cId')
+    status_str=$(echo "$publish_resp" | jq -r '.data.status')
+    
+    if [[ "$status_str" == "SUCCESS" && "$c2c_id" != "null" ]]; then
+        log_success "Published: c2cId=$c2c_id, price=${price_yuan} yuan"
+        PUBLISHED_IDS+=("$c2c_id")
+        return 0
+    else
+        log_error "Publish returned: c2cId=$c2c_id, status=$status_str"
+        return 1
+    fi
+}
+
+# Main publish flow
+do_publish() {
+    log_info "Starting batch publish..."
+    echo ""
+    
+    # Show price config
+    local price_config
+    price_config=$(config_get "publish.price" "200")
+    log_info "Price setting: $price_config yuan"
+    
+    local price_info
+    price_info=$(parse_price_config)
+    local mode="${price_info%%:*}"
+    
+    if [[ "$mode" == "random" ]]; then
+        local rest="${price_info#random:}"
+        local min_fen="${rest%%:*}"
+        local max_fen="${rest#*:}"
+        log_info "Mode: Random, range: $((min_fen/100))-$((max_fen/100)) yuan"
+    else
+        local price_fen="${price_info#fixed:}"
+        log_info "Mode: Fixed, price: $((price_fen/100)) yuan"
+    fi
+    
+    if $DRY_RUN; then
+        echo ""
+        log_warn "DRY-RUN mode: No items will actually be published"
+    fi
+    
+    echo ""
+    echo "========== Fetching Inventory =========="
+    echo ""
+    
+    local page_no=1
+    local total_processed=0
+    local total_success=0
+    
+    while true; do
+        log_info "Fetching page $page_no..."
+        
+        local resp
+        resp=$(fetch_inventory_page "$page_no")
+        
+        local code
+        code=$(echo "$resp" | jq -r '.code')
+        
+        if [[ "$code" != "0" ]]; then
+            log_error "Failed to fetch inventory: $resp"
+            
+            # Check login status
+            if [[ "$code" == "83000004" ]]; then
+                log_error "Session expired. Please re-login with 'bgs auth login'"
+                rm -f "$BG_AUTH_FILE"
+                exit 1
+            fi
+            exit 1
+        fi
+        
+        local has_next count
+        has_next=$(echo "$resp" | jq -r '.data.hasNextPage')
+        count=$(echo "$resp" | jq '.data.boxItemsDtos | length')
+        
+        if [[ "$count" -eq 0 ]]; then
+            log_info "No items on this page"
+        else
+            log_info "Found $count items on page $page_no"
+            echo ""
+        fi
+        
+        # Process each item on this page
+        for ((i=0; i<count; i++)); do
+            local blind_box_id items_name item_price
+            blind_box_id=$(echo "$resp" | jq -r ".data.boxItemsDtos[$i].blindBoxId")
+            items_name=$(echo "$resp" | jq -r ".data.boxItemsDtos[$i].itemsName")
+            item_price=$(echo "$resp" | jq -r ".data.boxItemsDtos[$i].price")  # fen
+            
+            ((total_processed++)) || true
+            
+            if process_item "$blind_box_id" "$items_name" "$item_price"; then
+                ((total_success++)) || true
+            fi
+            
+            echo ""
+        done
+        
+        # Check for next page
+        if [[ "$has_next" == "true" ]]; then
+            ((page_no++))
+        else
+            log_info "No more pages"
+            break
+        fi
+    done
+    
+    # Output summary
+    echo ""
+    echo "========== Summary =========="
+    echo ""
+    echo "  Total processed: $total_processed"
+    echo "  Successfully published: $total_success"
+    echo ""
+    
+    if [[ ${#PUBLISHED_IDS[@]} -gt 0 ]]; then
+        echo "Published item IDs:"
+        local ids_json="["
+        for ((i=0; i<${#PUBLISHED_IDS[@]}; i++)); do
+            if [[ $i -gt 0 ]]; then
+                ids_json+=","
+            fi
+            ids_json+="${PUBLISHED_IDS[$i]}"
+        done
+        ids_json+="]"
+        echo "$ids_json"
+    else
+        echo "[]"
+    fi
+}
+
+# Main function
+main() {
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+        esac
+    done
+    
+    # Ensure logged in and cookie is valid
+    ensure_auth
+    
+    # Execute publish
+    do_publish
+}
+
+main "$@"

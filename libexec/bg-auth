@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# ============================================================================
+# bgs auth - Authentication management
+# bgs = bilibili goods
+#
+# Usage: bgs auth <subcommand>
+#
+# Subcommands:
+#   login       Login with QR code
+#   logout      Logout and clear credentials
+#   status      Show login status
+#   refresh     Force refresh cookie
+# ============================================================================
+
+set -e
+
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Load dependencies
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/common.sh"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/auth.sh"
+
+# Show help
+show_help() {
+    cat << 'EOF'
+bgs auth - Manage authentication
+
+Usage: bgs auth <subcommand>
+
+Subcommands:
+  login       Login with QR code scan
+  logout      Logout and clear saved credentials
+  status      Show current login status
+  refresh     Force refresh cookie
+
+Examples:
+  bgs auth login     # Scan QR code to login
+  bgs auth status    # Check if logged in
+  bgs auth logout    # Clear credentials
+
+EOF
+}
+
+# Show login status
+do_status() {
+    if ! is_logged_in; then
+        log_warn "Not logged in"
+        echo ""
+        echo "Use 'bgs auth login' to login."
+        return 1
+    fi
+    
+    load_auth
+    
+    echo ""
+    log_success "Logged in"
+    echo ""
+    echo "  User ID:       $DEDE_USER_ID"
+    echo "  Auth file:     $BG_AUTH_FILE"
+    echo ""
+    
+    # Check cookie status
+    log_info "Checking cookie status..."
+    
+    local cookie
+    cookie=$(build_cookie)
+    
+    local url="${BILI_PASSPORT}/x/passport-login/web/cookie/info?csrf=${BILI_JCT}"
+    local resp
+    
+    resp=$(http_get "$url" "$cookie")
+    
+    local code
+    code=$(echo "$resp" | jq -r '.code')
+    
+    if [[ "$code" == "0" ]]; then
+        local refresh timestamp
+        refresh=$(echo "$resp" | jq -r '.data.refresh')
+        timestamp=$(echo "$resp" | jq -r '.data.timestamp')
+        
+        if [[ "$refresh" == "true" ]]; then
+            log_warn "Cookie needs refresh"
+            echo "  Use 'bgs auth refresh' to refresh."
+        else
+            log_success "Cookie is valid"
+        fi
+    else
+        log_warn "Failed to check cookie status"
+        log_debug "Response: $resp"
+    fi
+    
+    echo ""
+}
+
+# Logout
+do_logout() {
+    if [[ -f "$BG_AUTH_FILE" ]]; then
+        rm -f "$BG_AUTH_FILE"
+        log_success "Logged out successfully"
+    else
+        log_info "Already logged out"
+    fi
+}
+
+# Force refresh
+do_force_refresh() {
+    if ! is_logged_in; then
+        log_error "Not logged in. Please login first."
+        exit 1
+    fi
+    
+    # Force refresh without checking if needed
+    log_info "Force refreshing cookie..."
+    
+    load_auth
+    local old_refresh_token="$REFRESH_TOKEN"
+    
+    local timestamp
+    timestamp=$(get_timestamp_ms)
+    
+    local correspond_path
+    correspond_path=$(generate_correspond_path "$timestamp")
+    
+    if [[ -z "$correspond_path" ]]; then
+        log_error "Failed to generate correspondPath"
+        exit 1
+    fi
+    
+    local refresh_csrf
+    refresh_csrf=$(get_refresh_csrf "$correspond_path")
+    
+    if [[ -z "$refresh_csrf" ]]; then
+        log_error "Failed to get refresh_csrf"
+        exit 1
+    fi
+    
+    if ! do_refresh_cookie "$refresh_csrf"; then
+        log_error "Cookie refresh failed"
+        exit 1
+    fi
+    
+    confirm_refresh "$old_refresh_token"
+    
+    log_success "Cookie refreshed successfully"
+}
+
+# Main function
+main() {
+    local subcommand="${1:-status}"
+    shift || true
+    
+    case "$subcommand" in
+        login)
+            do_qr_login
+            ;;
+        logout)
+            do_logout
+            ;;
+        status)
+            do_status
+            ;;
+        refresh)
+            do_force_refresh
+            ;;
+        --help|-h|help)
+            show_help
+            ;;
+        *)
+            log_error "Unknown subcommand: $subcommand"
+            echo ""
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

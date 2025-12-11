@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# ============================================================================
+# bgs config - Configuration management
+# bgs = bilibili goods
+#
+# Usage: bgs config [key] [value]
+#
+# Options:
+#   --list      List all configurations
+#   --unset     Remove a configuration
+# ============================================================================
+
+set -e
+
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Load dependencies
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/common.sh"
+
+# Show help
+show_help() {
+    cat << 'EOF'
+bgs config - Manage configuration
+
+Usage:
+  bgs config <key>             Get configuration value
+  bgs config <key> <value>     Set configuration value
+  bgs config --list            List all configurations
+  bgs config --unset <key>     Remove a configuration
+
+Available configurations:
+  publish.price     Price for publishing items
+                    - Fixed: bgs config publish.price 200 (200 yuan)
+                    - Random: bgs config publish.price [100,300] (100-300 yuan)
+
+Examples:
+  bgs config publish.price 200        # Set fixed price 200 yuan
+  bgs config publish.price [100,300]  # Set random price 100-300 yuan
+  bgs config publish.price            # Get current price setting
+  bgs config --list                   # List all settings
+
+Note: Price unit is YUAN, will be converted to FEN internally.
+
+EOF
+}
+
+# Main function
+main() {
+    local arg1="${1:-}"
+    local arg2="${2:-}"
+    
+    case "$arg1" in
+        --help|-h|help)
+            show_help
+            ;;
+        --list|-l)
+            echo "Configuration file: $BG_CONFIG_FILE"
+            echo ""
+            config_list
+            ;;
+        --unset)
+            if [[ -z "$arg2" ]]; then
+                log_error "Please specify a key to unset"
+                exit 1
+            fi
+            config_unset "$arg2"
+            log_success "Removed: $arg2"
+            ;;
+        "")
+            show_help
+            ;;
+        *)
+            if [[ -z "$arg2" ]]; then
+                # Read config (with defaults for known keys)
+                local value default_value=""
+                
+                # Define default values for known keys
+                case "$arg1" in
+                    publish.price) default_value="200" ;;
+                esac
+                
+                value=$(config_get "$arg1" "$default_value")
+                if [[ -n "$value" ]]; then
+                    echo "$value"
+                    # Show hint if using default
+                    if [[ -n "$default_value" ]] && ! grep -qF "${arg1}=" "$BG_CONFIG_FILE" 2>/dev/null; then
+                        log_info "(default value)"
+                    fi
+                else
+                    log_warn "Configuration not set: $arg1"
+                    exit 1
+                fi
+            else
+                # Write config
+                # Handle array format values (may span multiple args)
+                local full_value="$arg2"
+                shift 2
+                while [[ $# -gt 0 ]]; do
+                    full_value="$full_value $1"
+                    shift
+                done
+                
+                # Remove extra spaces
+                full_value=$(echo "$full_value" | sed 's/  */ /g' | sed 's/\[ /[/g' | sed 's/ \]/]/g')
+                
+                config_set "$arg1" "$full_value"
+                log_success "Set $arg1 = $full_value"
+            fi
+            ;;
+    esac
+}
+
+main "$@"
