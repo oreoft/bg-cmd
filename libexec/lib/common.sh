@@ -132,24 +132,11 @@ is_logged_in() {
     return 1
 }
 
-# URL encode special characters in SESSDATA
-# Only encodes , and * which are common in SESSDATA
-url_encode_sessdata() {
-    local s="$1"
-    s="${s//,/%2C}"
-    s="${s//\*/%2A}"
-    echo "$s"
-}
-
 # Build cookie string for HTTP requests
+# SESSDATA is already URL-encoded when saved
 build_cookie() {
     load_auth || return 1
-    # URL encode SESSDATA if it contains unencoded special chars
-    local encoded_sessdata="$SESSDATA"
-    if [[ "$SESSDATA" == *,* ]] || [[ "$SESSDATA" == *\** ]]; then
-        encoded_sessdata=$(url_encode_sessdata "$SESSDATA")
-    fi
-    echo "SESSDATA=${encoded_sessdata}; bili_jct=${BILI_JCT}; DedeUserID=${DEDE_USER_ID}"
+    echo "SESSDATA=${SESSDATA}; bili_jct=${BILI_JCT}; DedeUserID=${DEDE_USER_ID}"
 }
 
 # ============================================================================
@@ -223,7 +210,7 @@ config_list() {
 # ============================================================================
 
 # Parse price config
-# Returns: "fixed:price" or "random:min:max" (unit: fen)
+# Returns: "fixed:price" or "random:min:max" (unit: yuan, same as API)
 parse_price_config() {
     local price_config
     price_config=$(config_get "publish.price" "200")
@@ -232,22 +219,20 @@ parse_price_config() {
     if [[ "$price_config" =~ ^\[([0-9]+),\ *([0-9]+)\]$ ]]; then
         local min_yuan="${BASH_REMATCH[1]}"
         local max_yuan="${BASH_REMATCH[2]}"
-        # Convert yuan to fen
-        local min_fen=$((min_yuan * 100))
-        local max_fen=$((max_yuan * 100))
-        echo "random:${min_fen}:${max_fen}"
+        echo "random:${min_yuan}:${max_yuan}"
     else
-        # Fixed price, convert yuan to fen
-        local price_fen=$((price_config * 100))
-        echo "fixed:${price_fen}"
+        echo "fixed:${price_config}"
     fi
 }
 
 # Calculate actual publish price
-# Args: $1 = item max price (fen)
-# Returns: actual price (fen)
+# Args: $1 = item max price (fen, from API)
+# Returns: actual price (yuan, for API input)
 calculate_price() {
-    local max_price="$1"
+    local max_price_fen="$1"
+    # Convert max price from fen to yuan for comparison
+    local max_price_yuan=$((max_price_fen / 100))
+    
     local price_info
     price_info=$(parse_price_config)
     
@@ -265,9 +250,9 @@ calculate_price() {
         price=$((RANDOM % (max - min + 1) + min))
     fi
     
-    # Use min of user price and item max price
-    if [[ "$price" -gt "$max_price" ]]; then
-        price="$max_price"
+    # Use min of user price and item max price (both in yuan)
+    if [[ "$price" -gt "$max_price_yuan" ]]; then
+        price="$max_price_yuan"
     fi
     
     echo "$price"

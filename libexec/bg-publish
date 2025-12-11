@@ -111,16 +111,15 @@ process_item() {
         return 1
     fi
     
-    # Step 2: Calculate price
+    # Step 2: Calculate price (in yuan)
     local price
     price=$(calculate_price "$max_price")
-    local price_yuan=$((price / 100))
     
     echo "  Token: ${token:0:16}..."
-    echo "  Price: ${price_yuan} yuan (${price} fen), max allowed: $((max_price / 100)) yuan"
+    echo "  Price: ${price} yuan, max allowed: $((max_price / 100)) yuan"
     
     if $DRY_RUN; then
-        log_info "[DRY-RUN] Would publish at ${price_yuan} yuan"
+        log_info "[DRY-RUN] Would publish at ${price} yuan"
         return 0
     fi
     
@@ -141,11 +140,11 @@ process_item() {
     status_str=$(echo "$publish_resp" | jq -r '.data.status')
     
     if [[ "$status_str" == "SUCCESS" && "$c2c_id" != "null" ]]; then
-        log_success "Published: c2cId=$c2c_id, price=${price_yuan} yuan"
+        log_success "Published: c2cId=$c2c_id, price=${price} yuan"
         PUBLISHED_IDS+=("$c2c_id")
         return 0
     else
-        log_error "Publish returned: c2cId=$c2c_id, status=$status_str"
+        log_error "Publish failed: $publish_resp"
         return 1
     fi
 }
@@ -166,12 +165,12 @@ do_publish() {
     
     if [[ "$mode" == "random" ]]; then
         local rest="${price_info#random:}"
-        local min_fen="${rest%%:*}"
-        local max_fen="${rest#*:}"
-        log_info "Mode: Random, range: $((min_fen/100))-$((max_fen/100)) yuan"
+        local min_yuan="${rest%%:*}"
+        local max_yuan="${rest#*:}"
+        log_info "Mode: Random, range: ${min_yuan}-${max_yuan} yuan"
     else
-        local price_fen="${price_info#fixed:}"
-        log_info "Mode: Fixed, price: $((price_fen/100)) yuan"
+        local price_yuan="${price_info#fixed:}"
+        log_info "Mode: Fixed, price: ${price_yuan} yuan"
     fi
     
     if $DRY_RUN; then
@@ -224,7 +223,7 @@ do_publish() {
             local blind_box_id items_name item_price
             blind_box_id=$(echo "$resp" | jq -r ".data.boxItemsDtos[$i].blindBoxId")
             items_name=$(echo "$resp" | jq -r ".data.boxItemsDtos[$i].itemsName")
-            item_price=$(echo "$resp" | jq -r ".data.boxItemsDtos[$i].price")  # fen
+            item_price=$(echo "$resp" | jq -r ".data.boxItemsDtos[$i].price | floor")  # fen
             
             ((total_processed++)) || true
             

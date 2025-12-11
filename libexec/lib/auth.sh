@@ -138,10 +138,15 @@ parse_login_response() {
     local sessdata bili_jct dede_user_id
     
     # URL format: https://passport.biligame.com/x/passport-login/web/crossDomain?DedeUserID=xxx&SESSDATA=xxx&bili_jct=xxx...
-    # Keep SESSDATA URL-encoded as-is (server expects encoded format)
     sessdata=$(echo "$login_url" | grep -oE 'SESSDATA=[^&]+' | cut -d'=' -f2)
     bili_jct=$(echo "$login_url" | grep -oE 'bili_jct=[^&]+' | cut -d'=' -f2)
     dede_user_id=$(echo "$login_url" | grep -oE 'DedeUserID=[^&]+' | cut -d'=' -f2)
+    
+    # URL encode SESSDATA if it contains unencoded special chars (server expects encoded format)
+    if [[ "$sessdata" == *,* ]] || [[ "$sessdata" == *\** ]]; then
+        sessdata="${sessdata//,/%2C}"
+        sessdata="${sessdata//\*/%2A}"
+    fi
     
     if [[ -z "$sessdata" || -z "$refresh_token" || -z "$bili_jct" ]]; then
         log_error "Failed to parse login response"

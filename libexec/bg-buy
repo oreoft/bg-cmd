@@ -189,7 +189,7 @@ process_buy_item() {
     fi
     
     local price name
-    price=$(echo "$detail_resp" | jq -r '.data.price')
+    price=$(echo "$detail_resp" | jq -r '.data.price | floor')
     name=$(echo "$detail_resp" | jq -r '.data.c2cItemsName')
     
     echo "  Name: $name"
@@ -216,7 +216,7 @@ process_buy_item() {
     fi
     
     local pay_total
-    pay_total=$(echo "$info_resp" | jq -r '.data.payTotalMoneyAll')
+    pay_total=$(echo "$info_resp" | jq -r '.data.payTotalMoneyAll | floor')
     echo "  Total: $((pay_total / 100)) yuan"
     
     # Step 3: Create order
@@ -235,7 +235,7 @@ process_buy_item() {
     local pay_info order_id pay_amount
     pay_info=$(echo "$create_resp" | jq '.data.payInfo')
     order_id=$(echo "$pay_info" | jq -r '.orderId')
-    pay_amount=$(echo "$pay_info" | jq -r '.payAmount')
+    pay_amount=$(echo "$pay_info" | jq -r '.payAmount | floor')
     
     echo "  Order ID: $order_id"
     echo "  Pay Amount: $((pay_amount / 100)) yuan"
