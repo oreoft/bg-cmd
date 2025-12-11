@@ -72,21 +72,16 @@ ensure_bg_home() {
 check_dependencies() {
     local missing=()
     
-    for cmd in curl jq openssl; do
+    # Required dependencies
+    for cmd in curl jq openssl qrencode; do
         if ! command -v "$cmd" &>/dev/null; then
             missing+=("$cmd")
         fi
     done
     
-    # qrencode is optional but required for QR code login
-    if ! command -v qrencode &>/dev/null; then
-        log_warn "qrencode not installed. QR code will not be displayed in terminal."
-        log_warn "Install with: brew install qrencode"
-    fi
-    
     if [[ ${#missing[@]} -gt 0 ]]; then
         log_error "Missing required dependencies: ${missing[*]}"
-        log_error "Please install them first."
+        log_error "Please install them with: brew install ${missing[*]}"
         exit 1
     fi
 }
@@ -137,10 +132,24 @@ is_logged_in() {
     return 1
 }
 
+# URL encode special characters in SESSDATA
+# Only encodes , and * which are common in SESSDATA
+url_encode_sessdata() {
+    local s="$1"
+    s="${s//,/%2C}"
+    s="${s//\*/%2A}"
+    echo "$s"
+}
+
 # Build cookie string for HTTP requests
 build_cookie() {
     load_auth || return 1
-    echo "SESSDATA=${SESSDATA}; bili_jct=${BILI_JCT}; DedeUserID=${DEDE_USER_ID}"
+    # URL encode SESSDATA if it contains unencoded special chars
+    local encoded_sessdata="$SESSDATA"
+    if [[ "$SESSDATA" == *,* ]] || [[ "$SESSDATA" == *\** ]]; then
+        encoded_sessdata=$(url_encode_sessdata "$SESSDATA")
+    fi
+    echo "SESSDATA=${encoded_sessdata}; bili_jct=${BILI_JCT}; DedeUserID=${DEDE_USER_ID}"
 }
 
 # ============================================================================
@@ -273,7 +282,7 @@ http_get() {
     local url="$1"
     local cookie="${2:-}"
     
-    local args=(-s -A "$UA")
+    local args=(-s -A "$UA" --connect-timeout 10 --max-time 30)
     if [[ -n "$cookie" ]]; then
         args+=(-H "cookie: $cookie")
     fi
@@ -287,7 +296,7 @@ http_post_json() {
     local data="$2"
     local cookie="${3:-}"
     
-    local args=(-s -A "$UA" -X POST -H "content-type: application/json")
+    local args=(-s -A "$UA" -X POST -H "content-type: application/json" --connect-timeout 10 --max-time 30)
     if [[ -n "$cookie" ]]; then
         args+=(-H "cookie: $cookie")
     fi

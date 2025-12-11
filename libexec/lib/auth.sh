@@ -18,7 +18,7 @@ source "${_AUTH_SCRIPT_DIR}/crypto.sh"
 # ============================================================================
 
 # Generate login QR code
-# Returns: qrcode_key
+# Returns: qrcode_key (to stdout), displays QR code to stderr
 qr_generate() {
     local url="${BILI_PASSPORT}/x/passport-login/web/qrcode/generate"
     local resp
@@ -37,30 +37,27 @@ qr_generate() {
     qrcode_key=$(echo "$resp" | jq -r '.data.qrcode_key')
     qrcode_url=$(echo "$resp" | jq -r '.data.url')
     
-    # Display QR code
-    echo ""
-    log_info "Please scan the QR code with Bilibili app"
-    echo ""
-    
-    if command -v qrencode &>/dev/null; then
-        # Use qrencode to display QR code in terminal
+    # Display QR code to stderr (so it shows to user)
+    {
+        echo ""
+        log_info "Please scan the QR code with Bilibili app"
+        echo ""
+        
+        # Generate QR code in terminal
         qrencode -t UTF8 -m 2 "$qrcode_url"
-    else
-        # No qrencode, show URL
-        log_warn "qrencode not installed, please open this URL in browser:"
+        
         echo ""
-        echo "  $qrcode_url"
+        log_info "Or open this URL in browser: $qrcode_url"
         echo ""
-        log_info "Or install qrencode: brew install qrencode"
-    fi
+    } >&2
     
-    echo ""
+    # Return qrcode_key to stdout (for capture)
     echo "$qrcode_key"
 }
 
 # Poll QR code scan status
 # Args: $1 = qrcode_key
-# Returns: login response on success
+# Returns: login response JSON to stdout on success
 qr_poll() {
     local qrcode_key="$1"
     local url="${BILI_PASSPORT}/x/passport-login/web/qrcode/poll?qrcode_key=${qrcode_key}"
@@ -72,30 +69,44 @@ qr_poll() {
         local resp
         resp=$(http_get "$url")
         
+        # Check if response is valid JSON
+        if [[ -z "$resp" ]] || ! echo "$resp" | jq -e . >/dev/null 2>&1; then
+            # Invalid response, retry
+            sleep 1
+            ((attempt++))
+            continue
+        fi
+        
         local code
         code=$(echo "$resp" | jq -r '.data.code')
         
         case "$code" in
             0)
-                # Login successful
-                log_success "Login successful!"
+                # Login successful (all display to stderr, only JSON to stdout)
+                {
+                    echo ""
+                    log_success "Login successful!"
+                } >&2
+                # Return JSON response to stdout
                 echo "$resp"
                 return 0
                 ;;
             86038)
                 # QR code expired
+                echo "" >&2
                 log_error "QR code expired. Please try again."
                 return 1
                 ;;
             86090)
-                # Scanned, waiting for confirmation
-                echo -ne "\r${YELLOW}[WAIT]${NC} Scanned, waiting for confirmation... "
+                # Scanned, waiting for confirmation (output to stderr)
+                echo -ne "\r${YELLOW}[WAIT]${NC} Scanned, waiting for confirmation... " >&2
                 ;;
             86101)
-                # Not scanned yet
-                echo -ne "\r${CYAN}[WAIT]${NC} Waiting for scan... ($((max_attempts - attempt))s) "
+                # Not scanned yet (output to stderr)
+                echo -ne "\r${CYAN}[WAIT]${NC} Waiting for scan... ($((max_attempts - attempt))s) " >&2
                 ;;
             *)
+                echo "" >&2
                 log_error "Unknown status code: $code"
                 log_debug "Response: $resp"
                 ;;
@@ -105,7 +116,7 @@ qr_poll() {
         ((attempt++))
     done
     
-    echo ""
+    echo "" >&2
     log_error "Login timeout. Please try again."
     return 1
 }
@@ -127,18 +138,21 @@ parse_login_response() {
     local sessdata bili_jct dede_user_id
     
     # URL format: https://passport.biligame.com/x/passport-login/web/crossDomain?DedeUserID=xxx&SESSDATA=xxx&bili_jct=xxx...
+    # Keep SESSDATA URL-encoded as-is (server expects encoded format)
     sessdata=$(echo "$login_url" | grep -oE 'SESSDATA=[^&]+' | cut -d'=' -f2)
     bili_jct=$(echo "$login_url" | grep -oE 'bili_jct=[^&]+' | cut -d'=' -f2)
     dede_user_id=$(echo "$login_url" | grep -oE 'DedeUserID=[^&]+' | cut -d'=' -f2)
-    
-    # URL decode SESSDATA (may contain special characters)
-    sessdata=$(printf '%b' "${sessdata//%/\\x}")
     
     if [[ -z "$sessdata" || -z "$refresh_token" || -z "$bili_jct" ]]; then
         log_error "Failed to parse login response"
         log_debug "URL: $login_url"
         return 1
     fi
+    
+    # Debug: show parsed values
+    log_debug "Parsed SESSDATA: ${sessdata:0:20}..."
+    log_debug "Parsed bili_jct: $bili_jct"
+    log_debug "Parsed refresh_token: $refresh_token"
     
     # Save auth info
     save_auth "$sessdata" "$refresh_token" "$bili_jct" "$dede_user_id"
@@ -153,19 +167,34 @@ parse_login_response() {
 do_qr_login() {
     log_info "Starting QR code login..."
     
-    # Generate QR code
+    # Generate QR code (QR displayed to stderr, key returned to stdout)
     local qrcode_key
-    qrcode_key=$(qr_generate | tail -1)
+    qrcode_key=$(qr_generate)
     
     if [[ -z "$qrcode_key" ]]; then
+        log_error "Failed to get qrcode_key"
         return 1
     fi
     
     # Poll status
     local login_resp
     login_resp=$(qr_poll "$qrcode_key")
+    local poll_status=$?
     
-    if [[ $? -ne 0 ]]; then
+    if [[ $poll_status -ne 0 ]]; then
+        return 1
+    fi
+    
+    # Validate response
+    if [[ -z "$login_resp" ]]; then
+        log_error "Empty login response"
+        return 1
+    fi
+    
+    # Check if response is valid JSON
+    if ! echo "$login_resp" | jq -e . >/dev/null 2>&1; then
+        log_error "Invalid JSON response"
+        log_debug "Response: $login_resp"
         return 1
     fi
     
@@ -398,6 +427,8 @@ ensure_auth() {
             log_error "Login failed. Please try again."
             exit 1
         fi
+        # Reload auth after login
+        load_auth
     fi
     
     # Try to refresh cookie
@@ -417,8 +448,13 @@ ensure_auth() {
                 log_error "Login failed. Please try again."
                 exit 1
             fi
+            # Reload auth after login
+            load_auth
         else
             exit 1
         fi
     fi
+    
+    # Final reload to ensure we have latest auth
+    load_auth
 }

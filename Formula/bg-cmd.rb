@@ -11,7 +11,7 @@ class BgCmd < Formula
   version "1.0.0"
 
   depends_on "jq"
-  depends_on "qrencode" => :recommended
+  depends_on "qrencode"
   # openssl and curl are built-in on macOS
 
   def install
