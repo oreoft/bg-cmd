@@ -5,7 +5,7 @@
 # ============================================================================
 
 # Version
-BG_VERSION="1.0.0"
+BG_VERSION="1.0.1"
 
 # Config directory and files
 BG_HOME="${HOME}/.bg-cmd"
