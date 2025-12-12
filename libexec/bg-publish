@@ -56,6 +56,17 @@ fetch_inventory_page() {
     http_get "$url" "$cookie"
 }
 
+# Fetch my published items
+fetch_my_published() {
+    local page_no="${1:-1}"
+    local cookie
+    cookie=$(build_cookie)
+    
+    local url="${BILI_MALL}/mall-magic-c/internet/c2c/items/pageQueryMyPublish?pageSize=${PAGE_SIZE}&pageNo=${page_no}&filterType=1"
+    
+    http_get "$url" "$cookie"
+}
+
 # Check item and get token
 check_blind_box() {
     local blind_box_id="$1"
@@ -251,8 +262,8 @@ do_publish() {
     echo "  Successfully published: $total_success"
     echo ""
     
+    echo "This batch published IDs:"
     if [[ ${#PUBLISHED_IDS[@]} -gt 0 ]]; then
-        echo "Published item IDs:"
         local ids_json="["
         for ((i=0; i<${#PUBLISHED_IDS[@]}; i++)); do
             if [[ $i -gt 0 ]]; then
@@ -262,6 +273,62 @@ do_publish() {
         done
         ids_json+="]"
         echo "$ids_json"
+    else
+        echo "[]"
+    fi
+    
+    # Query all published items
+    echo ""
+    echo "All published IDs:"
+    
+    local all_published_ids=()
+    local pub_page_no=1
+    
+    while true; do
+        local pub_resp
+        pub_resp=$(fetch_my_published "$pub_page_no")
+        
+        local pub_code
+        pub_code=$(echo "$pub_resp" | jq -r '.code')
+        
+        if [[ "$pub_code" != "0" ]]; then
+            log_error "Failed to fetch published items: $pub_resp"
+            break
+        fi
+        
+        local pub_has_next pub_count
+        pub_has_next=$(echo "$pub_resp" | jq -r '.data.hasNextPage')
+        pub_count=$(echo "$pub_resp" | jq '.data.list | length')
+        
+        if [[ "$pub_count" -eq 0 ]]; then
+            break
+        fi
+        
+        # Collect published item IDs
+        for ((i=0; i<pub_count; i++)); do
+            local c2c_items_id
+            c2c_items_id=$(echo "$pub_resp" | jq -r ".data.list[$i].c2cItemsId")
+            all_published_ids+=("$c2c_items_id")
+        done
+        
+        # Check for next page
+        if [[ "$pub_has_next" == "true" ]]; then
+            ((pub_page_no++))
+        else
+            break
+        fi
+    done
+    
+    if [[ ${#all_published_ids[@]} -gt 0 ]]; then
+        local all_ids_json="["
+        for ((i=0; i<${#all_published_ids[@]}; i++)); do
+            if [[ $i -gt 0 ]]; then
+                all_ids_json+=","
+            fi
+            all_ids_json+="${all_published_ids[$i]}"
+        done
+        all_ids_json+="]"
+        echo "$all_ids_json"
     else
         echo "[]"
     fi
